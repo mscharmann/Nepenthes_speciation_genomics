@@ -1,0 +1,353 @@
+###################### ###################### ######################
+# denovo-assembly + SNP calling + filtering dDocent-style but SE (modified by Mathias Scharmann)
+###################### ###################### ######################
+
+Credit due to Jonathan Puritz
+
+Puritz, J. B., Hollenbeck, C. M., & Gold, J. R. (2014). dDocent: A RADseq, variant-calling pipeline designed for population genomics of non-model organisms. PeerJ, 2, e431. doi:10.7717/peerj.431
+
+
+
+######################
+# 0 trim adapters, enforce high quality in barcode, demultiplex
+######################
+
+## raw_adaptertrim_HQbc_demultiplex.sh
+
+my_infile=$( )
+
+# remove any read containing any of the oligos used in library prep and/or sequencing:	
+trimmomatic SE -threads 12 -phred33 ${my_infile}.fq.gz ${my_infile}.adaptertrim.fq.gz ILLUMINACLIP:adapter_seqs.fasta:2:30:10 MINLEN:101
+
+# enfore phred >= 20 in each of the first 5 bases:
+zcat ${my_infile}.adaptertrim.fq.gz | python readfq_filter_phred20_in_barcode.py | gzip > ${my_infile}.adaptertrim.HQbarcode.fq.gz
+
+## process_radtags v 1.21 WITHOUT -r (barcode rescue) option on the pre-filtered reads!!
+mkdir samples_${my_infile}
+./process_radtags --inline_null -i gzfastq -f ./${my_infile}.adaptertrim.HQbarcode.fq.gz -o ./samples_${my_infile} -b barcodes_ddRAD.txt -E phred33 -D -e ecoRI -c -q -w 0.15 -s 20 -t 96
+
+rm ${my_infile}.adaptertrim.fq.gz
+rm ${my_infile}.adaptertrim.HQbarcode.fq.gz
+
+cd samples_${my_infile}
+parallel -j 6 gzip {} ::: $( ls sample* )
+		
+##
+
+
+######################
+# 1 Assemble
+######################
+
+# assembly_and_mapper_script.sh
+
+# start dDocent-like assembly:
+# concatenate everything
+zcat *.fq.gz | mawk 'BEGIN{P=1}{if(P==1||P==2){gsub(/^[@]/,">");print}; if(P==4)P=0; P++}' > concat.fasta
+
+#Convert fasta format to just sequences
+mawk '!/>/' concat.fasta > concat.seq
+
+#Find every unique sequence and count the number of occurrences
+perl -e 'while (<>) {chomp; $z{$_}++;} while(($k,$v) = each(%z)) {print "$v\t$k\n";}' concat.seq > uniq.seqs
+
+#Create a data file with the number of unique sequences and the number of occurrences
+ONE=$(mawk '$1 >= 2' uniq.seqs | wc -l)
+echo -e "2""\t""$ONE" > uniqseq.data
+
+for ((i = 3; i <= 50; i++));
+do
+J=$(mawk -v x=$i '$1 >= x' uniq.seqs | wc -l)
+echo -e "$i""\t""$J" >> uniqseq.data
+done
+
+
+
+#Function to convert a file of unique sequences to fasta format
+uniq2fasta()
+{
+i=1
+cat $1 | while read line
+do
+echo ">Contig"$i
+echo $line
+i=$(($i + 1))
+done
+}
+
+
+#Main function for assembly
+Assemble()
+{
+
+# main arguments: $CUTOFF, $vsearch_id, $simC
+# secondary arguments: $NUMProc
+
+mawk -v x=$CUTOFF '$1 >= x' uniq.seqs | cut -f 2 > totaluniqseq
+
+
+#Convert reads to fasta
+uniq2fasta totaluniqseq > uniq.fasta
+
+# instead of rainbow which wants PE data, we cluster with vsearch like pyRAD does:
+vsearch --fasta_width 0 --threads $NUMProc --id $vsearch_id --cluster_fast uniq.fasta --msaout vsearch_msaout.txt
+
+# instead of rainbow merge and best contig selection (which do not work with single-end data
+# use my python script:
+python ./vsearch_msaout_global_align_muscle.v2.py --vsearch_msa vsearch_msaout.txt
+
+#cd-hit to cluster reads based on sequence similarity
+cd-hit-est -i vsearch_muscle.fasta -o referenceRC.fasta -M 0 -T $NUMProc -c $simC &>cdhit.log
+
+#seqtk seq -r referenceRC.fasta > reference.fasta.original
+#rm referenceRC.fasta
+
+mv referenceRC.fasta reference.fasta.original
+
+sed -e 's/^C/NC/g' -e 's/^A/NA/g' -e 's/^G/NG/g' -e 's/^T/NT/g' -e 's/T$/TN/g' -e 's/A$/AN/g' -e 's/C$/CN/g' -e 's/G$/GN/g' reference.fasta.original > reference.fasta
+
+samtools faidx reference.fasta
+bwa index reference.fasta
+
+}
+
+
+CUTOFF=10
+NUMProc=24
+simC=0.9
+vsearch_id=0.9
+
+Assemble
+
+echo Done!
+
+
+
+######################
+# 2 mapping with bwa 
+######################
+
+for i in $( ls *.fq.gz | sed 's/.fq.gz//g' ) ; do
+
+bwa mem -a reference.fasta $i.fq.gz -L 20,5 -t $NUMProc -M -T 10 -R "@RG\tID:$i\tSM:$i\tPL:Illumina" 2> bwa.$i.log | mawk '!/\t[2-9].[SH].*/' | mawk '!/[2-9].[SH]\t/' | samtools view -@$NUMProc -q 1 -SbT reference.fasta - > $i.bam 2>$i.bam.log
+samtools sort -@$NUMProc $i.bam $i.sorted
+rm $i.bam
+mv $i.sorted.bam $i-RG.bam
+samtools index $i-RG.bam
+
+done
+
+rm *.bam.log bwa.*.log
+rm concat.fasta concat.seq uniq.seqs totaluniqseq uniq.fasta vsearch_msaout.txt vsearch_muscle.fasta
+
+##################################################################################
+##################################################################################
+##################################################################################
+
+##################################################################################
+
+
+########### fb_prep.sh
+## unite all bam files in a common directory for SNP calling, then:
+
+
+## get mapping success report:
+all_samples=$(ls ../denovo_assembly/*.fq.gz | sed 's/.fq.gz//g' )
+
+for sample in $all_samples ; do
+	stub_name=$( echo $sample | awk 'BEGIN { FS = "/" } ; { print $3 }' )
+	echo $stub_name
+	n_raw=$(( $(zcat $sample.fq.gz | wc -l ) / 4 ))	
+	n_uniq_mapped=$( samtools flagstat $stub_name-RG.bam | grep "in total (QC-passed reads + QC-failed reads)" | awk 'FS=" +" {print $1} ' )
+	prop=$( echo "$n_uniq_mapped / $n_raw" | bc -l )
+	echo $stub_name $n_raw $n_uniq_mapped $prop >> mapping_report.txt
+done
+
+
+##########
+####
+
+
+
+#####################
+# 3 SNP call
+#####################
+
+grep ">" reference.fasta | sed s/">"// > reference.contigs
+shuf reference.contigs > randomised_order.reference.contigs
+
+Nintervals=119
+
+NumMaps=$(cat randomised_order.reference.contigs | wc -l)
+IntervalSize=$(( $NumMaps / $Nintervals )) # original: 50 split makes maximum of 676 suffixes -> no more splitting higher than that 
+
+split -l $IntervalSize randomised_order.reference.contigs splitmap
+ls splitmap* > splitlist
+
+COUNTER=0
+for interval in $(ls splitmap*);
+do
+let COUNTER=COUNTER+1 
+mv $interval interval.${COUNTER}.txt
+done
+
+rm splitlist
+
+
+### subset also the reference.fasta to the same intervals:
+
+for i in $(seq 1 $(ls interval.*.txt | wc -l)) ;
+do
+	python filter_fasta_per_ids.py reference.fasta interval.${i}.txt interval.${i}.reference.fasta
+	
+done
+
+
+##################################################################################
+##################################################################################
+##################################################################################
+
+
+## this is: bamfile_splitting_for_jobarray.sh
+
+intervalfile=interval.${LSB_JOBINDEX}.txt
+for bamfile in $(ls *-RG.bam) ; do
+samtools view -h ${bamfile} | python filter_sam_for_refcontigs.py --contiglist ${intervalfile} | samtools view -bS - > ${bamfile}.${intervalfile}.bam
+sleep 2
+done
+sleep 10
+
+## submit as job array
+
+##################################################################################
+##################################################################################
+##################################################################################
+
+
+## this is: bamfile_split_sort_index_for_jobarray.sh
+module load samtools
+intervalfile=interval.${LSB_JOBINDEX}.txt
+for bamfile in $(ls *-RG.bam) ; do
+samtools sort ${bamfile}.${intervalfile}.bam -o ${bamfile}.${intervalfile}.bam
+samtools index ${bamfile}.${intervalfile}.bam
+sleep 1
+done
+sleep 10
+
+# submit as job array:
+
+##################################################################################
+##################################################################################
+##################################################################################
+
+
+## this is: freebayes_splittedbams_for_jobarray.sh
+sleep 100
+
+ls *interval.${LSB_JOBINDEX}.txt.bam > inbamlist.${LSB_JOBINDEX}
+freebayes -L inbamlist.${LSB_JOBINDEX} -v raw.${LSB_JOBINDEX}.vcf -f interval.${LSB_JOBINDEX}.reference.fasta -m 5 -q 5 -E 3 -G 3 --min-repeat-entropy 1 -V --hwe-priors-off -i -X -u
+sleep 100
+
+# submit as job array:
+
+## when done: clean up temp files:
+rm interval.*.txt
+rm interval.*.reference.fasta
+rm interval.*.reference.fasta.fai
+find . -maxdepth 1 -name "*bam.interval.*.txt.bam*" -print0 | xargs -0 rm
+rm inbamlist.*
+
+
+##################################################################################
+##################################################################################
+##################################################################################
+
+#####################
+# 4 SNP filtering
+#####################
+
+
+## this is vcf_parallel_filters_for_job_array.sh
+
+
+vcftools --vcf raw.${LSB_JOBINDEX}.vcf --minDP 3 --mac 1 --recode --recode-INFO-all --out ${LSB_JOBINDEX}.tmp1
+
+## remove any sites that were also mapped in the blank sample ( sample_blank-blank-ddH2o ) :
+vcftools --vcf ${LSB_JOBINDEX}.tmp1.recode.vcf --indv sample_blank-blank-ddH2o --site-depth --out ${LSB_JOBINDEX}
+cat ${LSB_JOBINDEX}.ldepth | awk '{if ($3 > 0) print $1}' | sort | uniq | grep -v "CHROM" > contig_blacklist.${LSB_JOBINDEX}.txt
+
+python vcf_subset_by_chromosome.py --vcf ${LSB_JOBINDEX}.tmp1.recode.vcf --exclude_chrom contig_blacklist.${LSB_JOBINDEX}.txt
+mv ${LSB_JOBINDEX}.tmp1.recode.vcfsubset.vcf ${LSB_JOBINDEX}.tmp2.recode.vcf 
+vcftools --vcf ${LSB_JOBINDEX}.tmp2.recode.vcf --remove-indv sample_blank-blank-ddH2o --recode --recode-INFO-all --out ${LSB_JOBINDEX}.tmp3
+
+#Because RADseq targets specific locations of the genome, we expect that the allele balance in our data (for real loci) should be close to 0.5, or if fixed in some population, it must be close to 0 or close to 1 (depending on what the reference is!)
+vcffilter -s -f "AB > 0.25 & AB < 0.75 | AB < 0.01 | AB > 0.99"  ${LSB_JOBINDEX}.tmp3.recode.vcf > ${LSB_JOBINDEX}.tmp4.recode.vcf
+
+# qual/ depth
+vcffilter -f "QUAL / DP > 0.25" ${LSB_JOBINDEX}.tmp4.recode.vcf > ${LSB_JOBINDEX}.tmp5.recode.vcf
+
+# we must filter for excess heterozygosity, as there appear to be a lot of sites were all or nearly all indivduals (across the species!) are heterozygous == most most likely paralogous seqs!
+vcftools --vcf ${LSB_JOBINDEX}.tmp5.recode.vcf --recode --recode-INFO-all --out ${LSB_JOBINDEX}.tmp6
+vcftools --vcf ${LSB_JOBINDEX}.tmp6.recode.vcf --hardy --out ${LSB_JOBINDEX}
+
+cat ${LSB_JOBINDEX}.hwe | awk '{ if ($8 <= 0.05 ) print $1 }' | sort | uniq > excessively_heterozygous_refcontigs.${LSB_JOBINDEX}.txt
+#rm out.hwe
+
+python vcf_subset_by_chromosome.py --vcf ${LSB_JOBINDEX}.tmp6.recode.vcf --exclude_chrom excessively_heterozygous_refcontigs.${LSB_JOBINDEX}.txt
+
+# final mac1 checking:
+$vcftb/vcftools --vcf ${LSB_JOBINDEX}.tmp6.recode.vcfsubset.vcf --mac 1 --recode --recode-INFO-all --out ${LSB_JOBINDEX}.tmp7
+mv ${LSB_JOBINDEX}.tmp7.recode.vcf ${LSB_JOBINDEX}.stage1_filtered.vcf
+# returns: ${LSB_JOBINDEX}.stage1_filtered.vcf
+# cleanup:
+rm ${LSB_JOBINDEX}.tmp* contig_blacklist.${LSB_JOBINDEX}.txt ${LSB_JOBINDEX}.ldepth ${LSB_JOBINDEX}.hwe excessively_heterozygous_refcontigs.${LSB_JOBINDEX}.txt ${LSB_JOBINDEX}.log
+
+#############
+# submit as job array.
+
+##################################################################################
+##################################################################################
+##################################################################################
+
+
+## this is vcf_stage_2_filter_single_job.sh
+# concatenate and filter
+
+# concatenate all partial vcfs:
+mv 1.stage1_filtered.vcf 01.stage1_filtered.vcf
+mv 2.stage1_filtered.vcf 02.stage1_filtered.vcf
+mv 3.stage1_filtered.vcf 03.stage1_filtered.vcf
+mv 4.stage1_filtered.vcf 04.stage1_filtered.vcf
+mv 5.stage1_filtered.vcf 05.stage1_filtered.vcf
+mv 6.stage1_filtered.vcf 06.stage1_filtered.vcf
+mv 7.stage1_filtered.vcf 07.stage1_filtered.vcf
+mv 8.stage1_filtered.vcf 08.stage1_filtered.vcf
+mv 9.stage1_filtered.vcf 09.stage1_filtered.vcf
+
+cat 01.stage1_filtered.vcf | grep "#" > TotalSNPs.stage1.vcf
+cat *.stage1_filtered.vcf | grep -v "#" >> TotalSNPs.stage1.vcf
+
+sleep 30
+
+vcftools --vcf TotalSNPs.stage1.vcf --geno-depth
+
+python vcf_drop_genotypes_exceeding_2std_indiv_mean_depth.py --vcf TotalSNPs.stage1.vcf --gdepth out.gdepth
+rm out.gdepth
+
+
+# use "--max-missing-count" argument of vcftools to include only RADtags that are covered in at least 2 individuals (4 chromosomes) of this set; otherwise the vcf file may contain un-informative sites. This is the ONLY site missingness filter applied:
+# note that "--max-missing-count" refers to number of chromosomes, NOT number of individuals (found this out by trying & online)
+n_chrom_tot=$(( $( head -100 TotalSNPs.stage1.vcf.indiv_cov_filtered.vcf | grep "sample" | sed 's/\t/\n/g' | grep -v "#" | grep "sample" | wc -l | awk '{print $1}')*2 ))
+n_chrom_tot_minus_two=$(( $n_chrom_tot - 4 ))
+
+$vcftb/vcftools --vcf TotalSNPs.stage1.vcf.indiv_cov_filtered.vcf --mac 1 --max-missing-count $n_chrom_tot_minus_two --recode 
+
+mv out.recode.vcf TotalSNPs.final_filtered.vcf
+
+#############
+# submit as job, allow 80GB RAM.
+
+
+######################################
+
+## when done: clean up temp files.

@@ -1,0 +1,172 @@
+# get NewHybrids
+	https://github.com/bwringe/parallelnewhybrid
+	http://ib.berkeley.edu/labs/slatkin/eriq/software/new_hybs_doc1_1Beta3.pdf
+
+
+git clone https://github.com/eriqande/newhybrids.git
+cd newhybrids
+git submodule init
+git submodule update
+
+# then configure it without-x for the Mac and make it
+./configure 
+make
+
+# the above makes two binaries:
+# newhybs    : newhybrids with the GLUT interface
+# newhybsng  : newhybrids with no GLUT interface
+
+
+#### now go to R:
+
+R
+#install.packages("devtools")
+#library(devtools)
+#devtools::install_github("bwringe/parallelnewhybrid")
+library(parallelnewhybrid)
+
+
+################
+When using many loci, one gets many warning messages like
+
+WARNING: i=6 >= Num=6 in IntegerFromProbsRV().  Probably only a problem while initializing the chain.  i reset to 4
+
+The _PofZ.txt file will then contain many "-nan" values.
+This is apparently a known issue:
+https://github.com/eriqande/newhybrids/issues/2
+
+=> Computational limitation: so will have to make do with small subsets of the available information.
+
+
+################################################################################################################
+# workflow:
+################################################################################################################
+# is based on input files also used fpr fastSTRUCTURE, i.e. one single random SNP per RADtag
+
+## *.z_options.txt : 
+- based on the popmaps used for pairwise fastSTRUCTURE
+
+## get the popmaps and modify them into *.z_options.txt files
+for i in \
+rafflesiana_gf-KuchingXXXrafflesiana_tf-Kuching \
+rafflesiana_gf-BruneiXXXrafflesiana_tf-Brunei \
+hemsleyana-BruneiXXXrafflesiana_tf-Brunei \
+hemsleyana-BinyoXXXrafflesiana_tf-Binyo \
+ampullaria-KuchingXXXmirabilis-Kuching \
+mirabilis-KuchingXXXrafflesiana_gf-Kuching \
+ampullaria-KuchingXXXgracilis-Kuching \
+hemsleyana-BruneiXXXrafflesiana_gf-Brunei ; do
+
+cp ../fastSTRUCTURE/popmap.$i ./$i.z_options.txt
+done
+
+### OK! now get the vcfs:
+
+for i in \
+rafflesiana_gf-KuchingXXXrafflesiana_tf-Kuching \
+rafflesiana_gf-BruneiXXXrafflesiana_tf-Brunei \
+hemsleyana-BruneiXXXrafflesiana_tf-Brunei \
+hemsleyana-BinyoXXXrafflesiana_tf-Binyo \
+ampullaria-KuchingXXXmirabilis-Kuching \
+mirabilis-KuchingXXXrafflesiana_gf-Kuching \
+ampullaria-KuchingXXXgracilis-Kuching \
+hemsleyana-BruneiXXXrafflesiana_gf-Brunei ; do
+
+cp ../fastSTRUCTURE/$i.miss0.2.recode.vcf.singleSNP.vcf.gz ./
+gunzip $i.miss0.2.recode.vcf.singleSNP.vcf.gz
+done
+
+ 
+#####################
+## Rscript_newhybrids.txt
+## usage: Rscript Rscript_newhybrids.txt z_optionsfile indivfile
+
+library(parallelnewhybrid)
+
+args <- commandArgs(trailingOnly = TRUE)
+
+z_optionsfile = args[1]
+indivfile = args[2]
+outfilename = paste( z_optionsfile, "NewHybrids.averaged_PofZ.100_SNPsets.txt", sep = "." )
+
+## Get the file path to the working directory, will be used to allow a universal example
+path.hold <- getwd()
+
+## Create an object that is the file path to the folder in which NewHybrids is installed. Note: this folder must be named "newhybrids"
+your.NH <- "/cluster/project/gdc/people/schamath/tools/newhybrids/"
+
+## Execute parallelnh
+parallelnh_LINUX(folder.data = paste0(path.hold, "/parallelnewhybrids_rundir/"), where.NH = your.NH, burnin = 1000, sweeps = 1000)
+
+
+pofz_files <- list.files(path = "./parallelnewhybrids_rundir/", pattern = "_PofZ.txt", all.files = FALSE,
+           full.names = T, recursive = T,
+           ignore.case = FALSE, include.dirs = FALSE)
+           
+mydata <- read.table(pofz_files[1], header = T)
+M <- mydata[,-c(1,2)]
+for (f in pofz_files[-1]) {
+d <- read.table(f, header = T)
+M1 <- d[,-c(1,2)]
+M = M + M1
+print(f)
+}
+
+samplenames = read.table(indivfile, header = F)
+
+out_data <- cbind(samplenames, M/length(pofz_files))
+colnames(out_data) <- c("sample_ID","pure_0","pure_1","F1","F2","0_BX","1_BX")
+
+write.table(out_data, outfilename, sep = "\t", quote = F, col.names = T, row.names = F)
+
+
+
+########### OK! now ready to loop
+
+for pop in \
+rafflesiana_gf-KuchingXXXrafflesiana_tf-Kuching \
+rafflesiana_gf-BruneiXXXrafflesiana_tf-Brunei \
+hemsleyana-BruneiXXXrafflesiana_tf-Brunei \
+hemsleyana-BinyoXXXrafflesiana_tf-Binyo \
+ampullaria-KuchingXXXmirabilis-Kuching \
+mirabilis-KuchingXXXrafflesiana_gf-Kuching \
+ampullaria-KuchingXXXgracilis-Kuching \
+hemsleyana-BruneiXXXrafflesiana_gf-Brunei ; do
+
+	vcf=$pop.miss0.2.recode.vcf.singleSNP.vcf
+	z_options=$pop.z_options.txt	
+
+	mkdir parallelnewhybrids_rundir
+	cd parallelnewhybrids_rundir
+	head -100 ../${vcf} | grep "#" > vcf_head
+	for i in {1..100} ; do
+		grep -v "#" ../${vcf} | shuf | head -500 > body
+		cat vcf_head body > SNP_set.${i}.vcf
+		python ../vcf_to_newhybrids_format.py --vcf SNP_set.${i}.vcf --z_option ../$z_options
+		rm body SNP_set.${i}.vcf SNP_set.${i}.vcf.newhybrids.txt.samplemap.txt
+	done
+	rm vcf_head
+	cd ../
+	
+	## now run NewHybrids:	
+	Rscript ./Rscript_newhybrids.txt ./$z_options ./parallelnewhybrids_rundir/SNP_set.1.vcf.newhybrids.txt.individuals.txt
+	sleep 3
+	rm -r parallelnewhybrids_rundir
+done
+
+
+
+
+################
+# OK done!
+#################
+
+
+
+
+
+
+
+
+
+

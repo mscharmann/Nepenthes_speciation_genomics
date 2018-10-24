@@ -1,0 +1,111 @@
+
+library(reshape)
+library(ggplot2)
+
+
+setwd("/Users/scharmann/Documents/1_POPGEN/Revision_for_MolEcol/submission/for_dryad/")
+
+mydata <- read.table("pitcher_trait_measurements_raw_data.Lim_et_al.txt", sep = "\t", header = TRUE)
+
+mydata$species <- as.factor(mydata$species)
+
+# create some relative traits:
+
+mydata$rel_peristome_to_girdle <- mydata$peristome_to_girdle / mydata$pitcher_length
+mydata$rel_internal_diameter <- mydata$internal_diameter / mydata$pitcher_length
+mydata$rel_external_diameter <- mydata$external_diameter / mydata$pitcher_length
+mydata$rel_external_diagonal <- mydata$external_diagonal / mydata$pitcher_length
+mydata$rel_internal_diagonal <- mydata$internal_diagonal / mydata$pitcher_length
+mydata$rel_peristome_to_fluid <- mydata$peristome_to_fluid / mydata$pitcher_length
+
+
+
+fst_dat <- read.table("hemsleyana_rafflesiana_Brunei.miss0.2.hybr_excl.mac1.recode.vcf.FstWC.txt", header = FALSE)
+Fst = mean( fst_dat$V1 )
+
+c_by_h2 = 1
+
+ubercollector <- c()
+accessory_collector <- c()
+
+for ( trait in c("pitcher_wall_thickness","pitcher_length","rel_peristome_to_girdle","rel_internal_diameter","rel_external_diameter","rel_external_diagonal","rel_internal_diagonal","rel_peristome_to_fluid") ) {
+
+tr = mydata[[trait]]
+spec = mydata$species
+
+obsdat = as.data.frame( cbind( spec, tr ) )
+
+Fst_collector <- c()
+Pst_collector <- c()
+collector <- c()
+for (i in seq(10)){
+  
+  n_observations = length( tr )
+  
+  # resample
+  idxes = sample(seq( n_observations ), n_observations, replace = TRUE)
+  d = obsdat[idxes,]
+  idxes = sample(seq( length( fst_dat[,1] ) ), n_observations, replace = TRUE)
+  fst_dat_res = fst_dat[idxes,1]
+  
+  # get Pst
+  fit <- lm(d[,2] ~ d[,1], data=d)
+  results <- anova(fit)
+  a = results$"Sum Sq"[1]
+  b = results$"Sum Sq"[2]
+  Pst = (c_by_h2 * a) / (c_by_h2*a + 2*b)
+  
+  # get Pst - Fst
+  Pst_minus_Fst <- Pst - mean(fst_dat_res)
+  
+  collector <- rbind(collector,  Pst_minus_Fst )
+  Fst_collector <- rbind(Fst_collector, mean(fst_dat_res) )
+  Pst_collector <- rbind(Pst_collector, Pst )
+  
+}
+
+ubercollector <- cbind( ubercollector, collector )
+
+Fst_CI_upper = quantile(Fst_collector, 0.975)
+Fst_CI_lower = quantile(Fst_collector, 0.025)
+Pst_CI_upper = quantile(Pst_collector, 0.975)
+Pst_CI_lower = quantile(Pst_collector, 0.025)
+Fst_mean = mean(Fst_collector)
+Pst_mean = mean(Pst_collector)
+
+sigmaW2_CI_lower = ((1 - Pst_CI_lower) * c_by_h2 ) / (2*Pst_CI_lower)
+critical_c_by_h2 = ( 2 * sigmaW2_CI_lower * Fst_CI_upper ) / (1 - Fst_CI_upper )
+
+accessory_collector <- rbind( accessory_collector, round( c( Fst_mean, Fst_CI_lower, Fst_CI_upper,  Pst_mean, Pst_CI_lower, Pst_CI_upper, critical_c_by_h2 ), 3) )
+
+}
+
+colnames(ubercollector) <- c("pitcher_wall_thickness","pitcher_length","rel_peristome_to_girdle","rel_internal_diameter","rel_external_diameter","rel_external_diagonal","rel_internal_diagonal","rel_peristome_to_fluid")
+rownames(ubercollector) <- NULL
+
+accessory_collector <- cbind( c("pitcher_wall_thickness","pitcher_length","rel_peristome_to_girdle","rel_internal_diameter","rel_external_diameter","rel_external_diagonal","rel_internal_diagonal","rel_peristome_to_fluid"), accessory_collector )
+accessory_collector <- data.frame(accessory_collector)
+colnames(accessory_collector) <- c( "trait", "Fst_mean", "Fst_CI_lower", "Fst_CI_upper",  "Pst_mean", "Pst_CI_lower", "Pst_CI_upper", "critical_c_by_h2" )
+
+write.table(accessory_collector, file = "Pst-Fst_comparisons.txt", append = FALSE, quote = FALSE, sep = "\t",
+            eol = "\n", na = "NA", dec = ".", row.names = FALSE,
+            col.names = TRUE)
+
+
+for_plot <- melt(ubercollector)[,2-3]
+for_plot$X2 <- as.factor(for_plot$X2)
+for_plot$X2 <- reorder(for_plot$X2, for_plot$value, FUN = mean)
+
+myplot <- qplot(X2, value, data = for_plot, geom = "violin") +
+  coord_flip() +
+  stat_summary(aes(group=X2), fun.y=median, geom="point",
+fill="black", shape=21, size=1) +
+	xlab("trait") +
+	ylab("Pst - Fst") +
+	geom_hline(aes(yintercept=0.0), linetype="dashed")
+
+svg("Pst-Fst_violin_plots.svg", width = 7, height = 3.5, pointsize = 12)
+plot(myplot)
+dev.off()	
+
+####

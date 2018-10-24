@@ -1,0 +1,40 @@
+
+### reasoning here:
+RF-ABC provides a posterior probability only for the best model, which means that posterior probabilites for sub-optimal models can not directly be compared when more than two models are competed. Hence, we devised a three-step hierarchical procedure of pairwise competitions, starting with SI against an aggregate, general 'migration' model (combined PSC, OSC and CM models, weighted 2:1:1). Second, we competed PSC against an aggregate model 'ongoing migration' (combined OSC and CM models, weighted equally), and third we competed OSC against CM. 
+
+weighting 2:1:1 for aggregate, general 'migration' model (combined PSC, OSC and CM models) is justified, because: OSC and CM have a 40-50% prior error rate; i.e. over a large parameter space they yield almost identical summary statistics!!
+
+############# get ABCstats etc.
+. . .
+
+###### get Rscript:
+Rscript_RF_classification.Nepenthes.txt
+
+##### then
+for each of the 54 sympatric pairs run:
+	Rscript Rscript_RF_classification.Nepenthes.txt
+
+###
+# collect results into a table:
+	 pairwise.divergence_and_PPs.txt
+
+
+####################### plot posterior probabilities of introgression against netDiv: (after re-arranging table in Excel):
+
+library(ggplot2)
+
+mydata <- read.table("ABC_model_choice_summary.2018-06-26.txt", header = T)
+
+pdf("netdiv_vs_introgression.pdf", height = 5, width = 8)
+plot(1, type = "n", xlim=c(min(mydata$netdiv_avg),max(mydata$netdiv_avg)), ylim = c(0,1), pch = 16, col = "dark grey", xlab = "net divergence", ylab = "posterior probability")
+abline(a = 0.75, b = 0 ,lty = "dashed", col = "black")
+abline(a = 0.25, b = 0 ,lty = "dashed", col = "black")
+for ( i in seq(1,length(mydata$netdiv_avg)) ) {
+	lines( c(mydata$netdiv_avg[i], mydata$netdiv_avg[i]), c(mydata$PSC_OSC_CM_vs_SI__pp_PSC_OSC_CM[i], mydata$OSC_CM_vs_PSC__pp_OSC_CM[i]) , lty = "dotted", col = "grey")
+}
+
+points(mydata$netdiv_avg, mydata$PSC_OSC_CM_vs_SI__pp_PSC_OSC_CM, col = "black", pch = 16)
+points(mydata$netdiv_avg, mydata$OSC_CM_vs_PSC__pp_OSC_CM, col = "black", bg = "dark grey", pch = 21)
+#points(mydata$netdiv_avg, mydata$CM_vs_OSC__pp_CM, col = "red", bg = "White", pch = 21)
+dev.off()
+

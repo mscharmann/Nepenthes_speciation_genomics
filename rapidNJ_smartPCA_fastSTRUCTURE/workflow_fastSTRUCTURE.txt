@@ -1,0 +1,204 @@
+
+
+## AIM: .vcf files per location with all species and samples that pass IDVMISS in them; then apply per-species missingness filter on the sites!
+
+
+vcf=
+
+#### create popmaps:
+
+############### ###############  ###############
+# filter .vcfs for pairs of populations, enforce mac 1!
+############### ###############  ###############
+- do this for all sympatric pairs of species (54)
+
+
+
+## this is popmiss_filter_for_cluster.sh
+
+if [[ -z "$2" ]]; then
+echo "Usage is pop_missing_filter vcffile popmap percent_missing_per_pop name_for_output"
+exit 1
+fi
+
+
+POPS=( `cut -f2 $2 | sort | uniq `)
+scratchdirname=scratchdir_${RANDOM}
+
+echo ${scratchdirname}
+mkdir ${scratchdirname}
+cd ${scratchdirname}
+
+for i in "${POPS[@]}"
+do (
+grep -w $i ../$2 | cut -f1 > keep.$i
+vcftools --vcf ../$1 --keep keep.$i --missing-site --out $i 
+awk '!/CHROM/' $i.lmiss | awk -v x=$3 '$6 < x' | cut -f1,2 > goodloci.${i}
+) &
+done
+
+wait
+
+mylist=$(ls goodloci.* | tr "\n" "\t")
+
+#comm -12  <(sort $(echo $mylist | awk '{print $1}') ) <(sort $(echo $mylist | awk '{print $2}')) > common_loci
+
+# iteratively finds common loci of arbitrary number of files:
+mylist_array=( $mylist )
+sort ${mylist_array[1]} > common_loci
+
+for i in $mylist ;
+do
+echo $i
+comm -12 <(sort $i ) <(sort common_loci) > tmp
+mv tmp common_loci
+done
+
+wc -l common_loci
+
+cut -f1 ../$2 > keep.overall
+
+vcftools --vcf ../$1 --keep keep.overall --positions common_loci --mac 1 --recode --recode-INFO-all --out $4
+mv $4.recode.vcf ../
+
+# cleanup
+cd ..
+rm -r ${scratchdirname}
+
+#####
+
+## check if getting sufficient number of loci after filtering!
+
+
+##################################################
+# then: run fastSTRUCTURE
+##################################################
+
+#####
+# common: select 1 single random SNP per RADtag to do the analyses on:
+#####
+
+for vcf in $(ls *.vcf) ; do
+
+python vcf_select_single_random_SNP_per_RADtag.py --vcf ${vcf}
+vcftools --vcf ${vcf} --positions single_SNP_sites_in_vcf.txt --recode
+mv out.recode.vcf ${vcf}.singleSNP.vcf
+rm single_SNP_sites_in_vcf.txt 
+
+done
+
+
+### generate input files and run fastSTRUCTURE for K = 2
+
+for vcf in $(ls *.singleSNP.vcf ) ; do
+		
+	### preparing inputs
+	vcftools --vcf ${vcf} --plink --out output_in_plink
+	# from plink.ped and plink.map to plink.bed, plink.bim, plink.fam:
+	plink --file output_in_plink --make-bed --noweb
+
+	mv plink.bed ${vcf}.bed
+	mv plink.bim ${vcf}.bim
+	mv plink.fam ${vcf}.fam
+
+	rm *output_in_plink*
+	rm plink*
+		
+	toolbox=
+	
+	### running fastSTRUCTURE k=2
+	python $toolbox/fastStructure/structure.py --input ${vcf} --output ${vcf} -K 2
+	
+	### bring fastSTRUCTURE output into R-readable format:
+	cat ${vcf}.fam | awk -F " " '{print $1}' > tmp2
+	paste tmp2 ${vcf}.2.meanQ > tmp
+	cat tmp | perl -p -e 's/ +/\t/g' > tmp2 && mv tmp2 tmp
+	cat tmp | awk -F "-" '{print $2"\t"$3}' > tmp2
+	paste tmp2 tmp > tmp3
+	sort -t $'\t' -k 1,2 tmp3 | cut -f 3- > tmp
+	mv tmp for_plotting_${vcf}.2.txt
+	rm tmp2 tmp3
+
+	### running fastSTRUCTURE k=3
+	python $toolbox/fastStructure/structure.py --input ${vcf} --output ${vcf} -K 3
+	
+	### bring fastSTRUCTURE output into R-readable format:
+    cat ${vcf}.fam | awk -F " " '{print $1}' > tmp2
+    paste tmp2 ${vcf}.3.meanQ > tmp
+    cat tmp | perl -p -e 's/ +/\t/g' > tmp2 && mv tmp2 tmp
+    cat tmp | awk -F "-" '{print $2"\t"$3"\t"$4}' > tmp2
+    paste tmp2 tmp > tmp3
+    sort -t $'\t' -k 1,2 tmp3 | cut -f 7- > tmp
+    mv tmp for_plotting_${vcf}.3.txt
+    rm tmp2 tmp3
+done
+
+
+## cleanup:
+
+rm *.log *.meanP *.meanQ *.bed *.bim *.fam
+
+
+###### plot:
+
+for infile in $( ls for_plotting*.txt ) ; do
+
+Rscript ./Rscript_plotting_fastSTRUTCURE.txt ${infile}
+
+done
+
+
+################
+################### Rscript for plotting:
+
+## this is Rscript_plotting_fastSTRUTCURE.txt
+library(ggplot2)
+library(reshape2)
+
+args <- commandArgs(trailingOnly = TRUE)
+
+input_filename = args[1]
+
+mydata <- read.table( input_filename , sep = "\t", row.names=NULL)
+
+reshaped <- melt(mydata)
+reshaped$V1 <- as.character(reshaped$V1)
+
+reshaped$V1 <- factor(reshaped$V1, levels=unique(reshaped$V1))
+
+# factor(as.character(reshaped$V1), levels = reshaped$V1, ordered = TRUE)
+
+the_title = strsplit(input_filename, " ")
+a = gsub("for_plotting_", "", input_filename)
+b = gsub("XXX", " and ", a)
+c = gsub(".miss0.2.recode.vcf.singleSNP.vcf.3.txt", ", k=3, unlinked SNPs (one random SNP per RAD-tag)", b)
+d = gsub(".miss0.2.recode.vcf.singleSNP.vcf.2.txt", ", k=2, unlinked SNPs (one random SNP per RAD-tag)", c)
+
+the_plot <- ggplot(reshaped, aes( x = V1 , y = value , fill = variable)) +
+	geom_bar(stat="identity") +
+	
+	# reverse order of legend
+	guides(fill = guide_legend(reverse=TRUE)) +
+	
+	#theme with white background
+  	theme_bw() +
+
+  	#eliminates background, gridlines, and chart border
+  	theme(
+    plot.background = element_blank()
+   ,panel.grid.major = element_blank()
+   ,panel.grid.minor = element_blank()
+   ,panel.border = element_blank()
+  	) +
+	theme(axis.text.x = element_text(size=12, angle = 90, vjust = 0.5, hjust=1), axis.title.x = element_blank(), axis.title.y = element_blank() ) +
+	
+	ggtitle(d) +
+	theme(plot.title = element_text(size = 14, face = "bold")) +
+	theme(legend.position="none")
+
+pdf( paste(input_filename, ".pdf", sep = "") , width=20)
+print(the_plot)
+dev.off()
+
+########
+

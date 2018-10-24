@@ -1,0 +1,35 @@
+
+
+# pseudocode
+for each of the 54 smypatric species pairs:
+	for each of the four models PSC, SI, CM and OSC:
+		generate 20k simulations
+		
+
+# actually starting a set of simulations by:
+bash simulate.2018-06-23.sh bpfile.txt spinput.txt Nepenthes.twophase.SI
+
+# essential files and scripts are:
+
+argfile.Nepenthes.twophase.SI.txt
+argfile.Nepenthes.twophase.PSC.txt
+argfile.Nepenthes.twophase.OSC.txt
+argfile.Nepenthes.twophase.CM.txt
+Rscript_RF_classification.Nepenthes.ongoing_vs_not.2018-06-23.txt
+Rscript_RF_classification.Nepenthes.2018-06-23.txt
+draw_ms_priors.Nepenthes.2pop.2018-06-23.py
+simulate.2018-06-23.sh
+example.spinput.txt
+example.bpfile.txt
+msnsam
+ms2stats.arbitrary_npop.stats.py
+ms2stats.arbitrary_npop.counter.py
+
+
+
+
+
+
+
+
+		

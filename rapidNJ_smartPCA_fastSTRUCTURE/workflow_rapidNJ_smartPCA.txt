@@ -1,0 +1,183 @@
+
+## AIM: .vcf files per location with all species and samples that pass IDVMISS in them; then apply per-species missingness filter on the sites!
+
+vcf=
+
+#### create popmaps
+
+### Filter from master-vcf: mac1 !!
+
+for i in Brunei Singapore Binyo Kuching ; do
+cat ${i}_master_popmap.idvmissfiltered.txt | cut -f1 > keeplist_${i}
+done
+
+for i in Brunei Singapore Binyo Kuching ; do (
+vcftools --vcf ${vcf} --keep keeplist_${i} --max-missing 0.9 --mac 1 --recode --out SNPs.${i}.for_NJ.maxmiss_0.9 )&
+vcftools --vcf ${vcf} --keep keeplist_${i} --max-missing 0.99 --mac 1 --recode --out SNPs.${i}.for_NJ.maxmiss_0.99
+done
+rm keeplist*
+
+### results:
+- fastSTRUCTURE, NewHybrids, rapidNJ and smartPCA: genotypes min-depth = 3 !!
+
+##################################################
+# rapidNJ
+##################################################
+
+for vcf in $( ls *.for_NJ.maxmiss_0.9.recode.vcf ) ; do
+
+python vcf_to_phylip.py --vcf ${vcf}
+
+python phylip2stockholm.py ${vcf}.phylip.txt
+
+rapidnj_2.3.2 ${vcf}.phylip.txt.sth -n -o t -a kim -c 12 -m 10000 -t d -b 100 -x ${vcf}.rapidNJ_tree.txt
+
+done
+
+rm *.sth
+
+
+### go to R for plotting:
+
+library(ape)
+
+
+plot_tree_with_symboltips <- function(treefile) { 
+	
+	MyTree <- read.tree(treefile)
+	
+	tmp <- strsplit(MyTree$tip, "-")
+	tmp2 <- sapply(tmp,function(x){x[2]})
+	tmp3 <- sapply(tmp,function(x){x[3]})
+	mytiplabels <- as.factor(paste(tmp2, tmp3, sep="_"))
+	#mytiplabels <- as.factor(tmp2)
+	
+	#levels(mytiplabels) <- c("blue","red")
+	
+	svg(paste(treefile,".svg", sep=""))
+	plot(MyTree, "u", show.tip.label = FALSE, show.node.label = FALSE)
+	#tiplabels(pch=20, col="green", cex=0.9)
+	tiplabels(pch=19, col=mytiplabels, cex=1)
+
+	legend("topright", legend=levels(mytiplabels), text.col=seq_along(levels(mytiplabels)), pch = 20, col= seq_along(levels(mytiplabels)))
+
+
+#	nodelabels(MyTree$node.label, bg = "white", adj = c(1.1,1.5), frame =  
+#	"none", cex = 0.8)
+
+	dev.off()
+
+}
+
+
+treefiles <- c(
+"*recode.vcf.rapidNJ_tree.txt")
+
+
+for (treefile in treefiles) {
+plot_tree_with_symboltips(treefile)
+}
+
+
+
+
+##################################################
+# smartPCA
+##################################################
+#### smaprtpca wants very short sample names, otherwise it won't work: replace the oldnames with shortnames in the vcf headers; this is reversible:
+
+########### START OF SMARTPCA LOOP: execute this from a bash script!
+for x in $( ls *.for_PCA.maxmiss_0.99.recode.vcf ) ; do
+
+vcf=${x}
+
+# since the replacement needs to read and write the entire file in every single loop, 
+# do loop only over head of the vcf and put the new head back to the body only in the end!
+
+grep "#" ${vcf} > temp_vcf_head_${vcf}
+grep -v "#" ${vcf} > temp_vcf_body_${vcf}
+
+cat ${vcf} | grep "#" | tail -1 | tr "\t" "\n" | grep "sample" > tmp1
+
+cat tmp1 | awk 'BEGIN { FS="_" } ; {print $2}' | awk 'BEGIN { FS="-" } ; {print "x_"$1"_y"}' > tmp2
+
+paste tmp1 tmp2 > renaming_list_${vcf}.txt
+
+while read nameline; do
+
+newname=$(echo $nameline | awk '{print $2}') 
+oldname=$(echo $nameline | awk '{print $1}')  
+
+echo $newname $oldname
+
+perl -i -pe "s/${oldname}/${newname}/" temp_vcf_head_${vcf}
+
+done < renaming_list_${vcf}.txt
+
+cat temp_vcf_head_${vcf} temp_vcf_body_${vcf} > shortnames_${vcf}
+rm temp_vcf_head_${vcf} temp_vcf_body_${vcf}
+rm tmp1 tmp2
+
+#### make the smartpca popmaps (popmaps with the shortnames)
+## indiv_ID	popID
+
+cat renaming_list_${vcf}.txt | grep gracilis | awk '{print $2"\tgracilis"}' > smartpca_popmap.${x}.txt
+cat renaming_list_${vcf}.txt | grep ampullaria | awk '{print $2"\tampullaria"}' >> smartpca_popmap.${x}.txt
+cat renaming_list_${vcf}.txt | grep bicalcarata | awk '{print $2"\tbicalcarata"}' >> smartpca_popmap.${x}.txt
+cat renaming_list_${vcf}.txt | grep rafflesiana | awk '{print $2"\trafflesiana_tf"}' >> smartpca_popmap.${x}.txt
+cat renaming_list_${vcf}.txt | grep hemsleyana | awk '{print $2"\themsleyana"}' >> smartpca_popmap.${x}.txt
+cat renaming_list_${vcf}.txt | grep giant | awk '{print $2"\trafflesiana_gf"}' >> smartpca_popmap.${x}.txt
+cat renaming_list_${vcf}.txt | grep mirabilis | awk '{print $2"\tmirabilis"}' >> smartpca_popmap.${x}.txt
+
+
+### now run vcf2smartpca
+
+python vcf2smartpca.py shortnames_${vcf} ${x} 0 smartpca_popmap.${x}.txt
+
+
+### now finally run smartpca:
+
+# edit the par. to avoid exclusion of "outlier" samples:
+sed -i 's/numoutlieriter:  3/numoutlieriter:  0/' par.${x}
+
+smartpca -p par.${x} > ${x}_logfile.txt 
+
+### 
+# .evec contains each individual’s loadings on each of the principle components:
+# plot these in R, but first make tabsep from the useless whitespace-separation output by smartpca:
+
+# tr -s matches 1 or more spaces and replaces with a single tab:
+cat ${x}*.evec | tr -s [:blank:] \\t > loadings_to_plot_${x}.txt 
+
+# clean / remove heading tab on each line and "#" from header:
+sed -i 's/^\t//' loadings_to_plot_${x}.txt 
+sed -i 's/\#//' loadings_to_plot_${x}.txt 
+
+done
+########### END OF SMARTPCA LOOP
+
+
+### plot PCA first 2 dimensions in R:
+
+datafrs <- c(
+"SNPs.Binyo.for_PCA.maxmiss_0.99.recode.vcf")
+
+for (datafr in datafrs ) {
+
+datafr.name = datafr
+DF <- read.table(sprintf("loadings_to_plot_%s.txt", datafr), header = TRUE, sep = "\t", row.names=NULL)
+
+DF$X <- as.factor(DF$X)
+
+svg(sprintf("PCA_%s.svg", datafr.name))
+
+plot(DF[,2], DF[,3], xlab=sprintf("PC 1: %s", names(DF)[2]), ylab=sprintf("PC 2: %s", names(DF)[3]), col = DF$X, pch = 16, cex = 1.5)
+legend("topright", legend = levels(DF$X), col=seq_along(levels(DF$X)), pch = 16, cex = 1.5)
+
+
+dev.off()
+
+}
+
+###################################### DONE!
+

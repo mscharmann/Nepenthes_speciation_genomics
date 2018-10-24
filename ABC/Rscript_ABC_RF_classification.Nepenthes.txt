@@ -1,0 +1,409 @@
+################################################
+# -2. define some custom functions
+################################################
+
+
+random_sample_from_sumstats <- function(sumstats_data, sample_size) {
+
+	collector <- data.frame(matrix(ncol = ncol(sumstats_data), nrow = 0))
+	colnames(collector) <- colnames(sumstats_data)
+
+	for ( level in levels(as.factor(sumstats_data$model)) ) {
+		print(level)
+		a <- sumstats_data[sumstats_data$model == level, ]
+		randsample <- a[ sample(1:nrow(a), sample_size, replace=FALSE), ]
+		collector <- rbind(collector, randsample)
+		}
+	return(collector)
+	
+	}
+
+find_near_zero_variance_columns <- function(mydataframe) {
+	
+	# because lda.default() refuses to work with data that has < 1e-08 variance (tol)
+	# but lda are useful predictors and we want them
+	
+	bad_columns = c()
+	for ( i in seq(1, ncol(mydataframe) ) ) {
+		if ( var( mydataframe[,i] ) < 1e-07 ) {
+			bad_columns <- append(bad_columns, i)
+			}
+		}
+#	print(bad_columns)
+	return(bad_columns)
+	}
+
+make_and_plot_LDA <- function(all_sumstats_nomodel, modelinex, obs_real, outfile_prefix) {
+
+## requires libraries MASS , ggplot
+
+# 1. scale and center the summary statistics, keep record of the parameters to transform also the observed stats:
+
+sumstat_column_means <- apply(all_sumstats_nomodel,2,mean) # to dimension 2 = columns
+sumstat_column_sds <- apply(all_sumstats_nomodel,2,sd)
+
+scaled_and_centered_sumstats <- as.data.frame(matrix(0, ncol = ncol(all_sumstats_nomodel), nrow = nrow(all_sumstats_nomodel)))
+for ( stat_idx in seq(1, ncol(all_sumstats_nomodel) )) {
+	a <- all_sumstats_nomodel[,stat_idx] - sumstat_column_means[stat_idx]
+	a <- a / sumstat_column_sds[stat_idx]
+	scaled_and_centered_sumstats[,stat_idx] <- a
+	}
+colnames(scaled_and_centered_sumstats) <- colnames(all_sumstats_nomodel)
+
+obs.scaled_and_centered <- as.data.frame(matrix(0, ncol = ncol(obs_real), nrow = nrow(obs_real)))
+for ( stat_idx in seq(1, ncol(obs_real) )) {
+	a <- obs_real[,stat_idx] - sumstat_column_means[stat_idx]
+	a <- a / sumstat_column_sds[stat_idx]
+	obs.scaled_and_centered[,stat_idx] <- a
+	}
+colnames(obs.scaled_and_centered) <- colnames(obs_real)
+
+# 2. now do the LDA, project sumstats and observed into LDA space, and plot first two axes:
+
+modelindex <- as.factor(modelindex)
+
+my_lda <- lda(scaled_and_centered_sumstats, modelindex, tol = 1.0e-12)
+
+lda_pred <- predict(object = my_lda, newdata = scaled_and_centered_sumstats)
+obs_projected_into_LDA_space <- predict(object = my_lda, newdata = obs.scaled_and_centered) 
+
+print(obs_projected_into_LDA_space)
+
+dataset = data.frame(model = modelindex, lda = lda_pred$x)
+       
+LD1.2 <- ggplot(dataset) + geom_point(aes(lda.LD1, lda.LD2, colour = model), size = 1.0, alpha = 0.3) + 
+			geom_point(x=obs_projected_into_LDA_space$x[,1], y=obs_projected_into_LDA_space$x[,2], shape=3, size=3.0, colour="black") +
+			scale_colour_manual(values=cbPalette)
+
+pdf( sprintf("%s.LDA.pdf", outfile_prefix) )
+print(LD1.2)
+dev.off()
+
+}
+
+
+
+################################################
+# -1. load dependencies
+################################################
+
+library(abcrf)
+library(ggplot2)
+library(data.table)
+library(MASS)
+
+# http://www.cookbook-r.com/Graphs/Colors_%28ggplot2%29/#a-colorblind-friendly-palette
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+#  To use for fills, add
+#   scale_fill_manual(values=cbPalette)
+# 
+# # To use for line and point colors, add
+#   scale_colour_manual(values=cbPalette)
+
+
+
+################################################
+# 0. import simulated statistics 
+################################################
+
+
+models = c("SI","CM","OSC","PSC")
+
+# name for all outfiles:
+
+outfile_prefix <- paste(c(models), collapse = ".")
+
+for (i in models ) {
+
+INPUT <- fread((sprintf("ABCstat.%s.txt", i)), data.table = FALSE, na.strings="na")
+colnames(INPUT) <- make.names(colnames(INPUT))
+#  # remove zero-variance summary statistics: since segsites are fixed... bialsites_avg	bialsites_std
+# INPUT <- subset(INPUT, select = -bialsites_avg)
+# INPUT <- subset(INPUT, select = -bialsites_std)
+INPUT <- cbind(sprintf("%s", i), INPUT)
+colnames(INPUT)[1] <- "model"
+assign(sprintf("sumstats_%s", i), INPUT)
+
+}
+
+rm(INPUT)
+
+all_sumstats <- do.call(rbind, mget(ls(pattern='sumstats_')))
+all_sumstats <- data.frame(all_sumstats, row.names=NULL)
+all_sumstats <- na.omit(all_sumstats) # remove eventual NAs that result from little bugs in the generation of the input files
+
+all_sumstats_nomodel <- subset(all_sumstats, select = -model)
+
+# drop near zero-variance stats:
+tb_dropped_columns <- find_near_zero_variance_columns(all_sumstats_nomodel)
+if ( ! is.null(tb_dropped_columns) ) {
+all_sumstats_nomodel <- subset(all_sumstats_nomodel, select = -tb_dropped_columns)
+}
+
+# stitch back together and separate again:
+all_sumstats <- cbind(all_sumstats$model , all_sumstats_nomodel)
+colnames(all_sumstats)[1] <- "model"
+all_sumstats_nomodel <- subset(all_sumstats, select = -model)
+modelindex <- as.vector(all_sumstats$model)
+
+
+print("succesfully read input data")
+
+
+################################################
+# 1.  import observed data:
+################################################
+
+
+## import obs if there is any:
+
+obs_real <- fread("TEMPLATE", data.table = FALSE, na.strings="na")
+obs_real <- data.frame(obs_real)
+
+# drop the columns / statistics that have near zero variance in the reference table:
+if ( ! is.null(tb_dropped_columns) ) {
+obs_real <- subset(obs_real, select = -tb_dropped_columns)
+}
+
+print(obs_real)
+
+################################################
+# 2. check model overlap simplisitc, visually with histograms for each sumstat
+################################################
+print("doing histograms")
+model <- modelindex
+
+pdf( sprintf("%s.sumstat_histograms.pdf", outfile_prefix) )
+
+for (stat in colnames(all_sumstats_nomodel) ) {
+
+mydat <- data.frame(modelindex, all_sumstats[[stat]] )
+
+histplot <- ggplot(mydat, aes( x = mydat[,2] , fill = model )) + geom_histogram(alpha = 0.6, aes(y = ..density..), position = 'identity') + xlab( stat ) + geom_vline(xintercept = obs_real[[stat]]) + scale_fill_manual(values=cbPalette)
+
+plot(histplot)
+
+} 
+dev.off()
+
+################################################
+# 3. check model overlap simplistic, visually with a PCA
+################################################
+print("doing PCA")
+# plot 6 first axes of PCA on the sumstats!
+
+subsampled <- random_sample_from_sumstats(all_sumstats, 9000)
+subsampled_nomodel <- subset(subsampled, select = -model)
+subsampled_modelindex <- as.vector(subsampled$model)
+
+all_sumstats_PCA <- prcomp(subsampled_nomodel, center=TRUE, scale.=TRUE)
+
+scores <- data.frame(subsampled_modelindex, all_sumstats_PCA$x[,1:6])
+
+pc1.2 <- qplot(x=PC1, y=PC2, data=scores, colour=factor(subsampled_modelindex), size = I(1.0), alpha = 0.2 ) + scale_colour_manual(values=cbPalette)
+pc3.4 <- qplot(x=PC3, y=PC4, data=scores, colour=factor(subsampled_modelindex), size = I(1.0), alpha = 0.2  ) + scale_colour_manual(values=cbPalette)
+pc5.6 <- qplot(x=PC5, y=PC6, data=scores, colour=factor(subsampled_modelindex), size = I(1.0), alpha = 0.2  ) + scale_colour_manual(values=cbPalette)
+
+pdf( sprintf("%s.sumstat_PCA.pdf", outfile_prefix)  )
+pc1.2
+pc3.4
+pc5.6
+dev.off()
+
+################################################
+# 4. check model fit simplisitc, visually with a LDA: Where does obs tend to fall, how well distinguishable are the models?
+################################################
+print("doing LDA")
+
+## it sometimes throws this error:
+# Error in eval(expr, envir, enclos) : object 'lda.LD1' not found
+# Calls: make_and_plot_LDA ... by_layer -> f -> <Anonymous> -> f -> lapply -> FUN -> eval
+# Execution halted
+## so we wrap the LDA in tryCatch to skip if necessary!
+
+tryCatch({  make_and_plot_LDA(all_sumstats_nomodel, modelinex, obs_real, outfile_prefix) }, error = function(e) {"eh-eh, skipping LDA"})
+
+################################################
+# 5. final analyis: build random forest (highest parameters), classify and compute posterior prob.: SI vs any GF
+################################################
+
+collector <- matrix(ncol = 5, nrow = 0)
+
+tmp <- all_sumstats[all_sumstats$model=="OSC",]
+tmp$model <- as.factor(as.character(tmp$model))
+downsampled_OSC <- random_sample_from_sumstats(tmp,5000)
+
+tmp <- all_sumstats[all_sumstats$model=="PSC",]
+tmp$model <- as.factor(as.character(tmp$model))
+downsampled_PSC <- random_sample_from_sumstats(tmp,10000)
+
+tmp <- all_sumstats[all_sumstats$model=="CM",]
+tmp$model <- as.factor(as.character(tmp$model))
+downsampled_CM <- random_sample_from_sumstats(tmp,5000)
+
+sumstats_PSC_OSC_CM <- rbind(downsampled_OSC, downsampled_PSC,downsampled_CM )
+
+sumstats_PSC_OSC_CM$model <- "PSC_OSC_CM"
+
+SI_vs_PSC_OSC_CM <- rbind(all_sumstats[all_sumstats$model=="SI",], sumstats_PSC_OSC_CM  )
+modelindex <- as.factor(as.character(SI_vs_PSC_OSC_CM$model))
+SI_vs_PSC_OSC_CM_nomodel <- SI_vs_PSC_OSC_CM
+SI_vs_PSC_OSC_CM_nomodel$model <- NULL
+
+#
+print("growing final random forest")
+my_RF1 <- abcrf(modelindex, SI_vs_PSC_OSC_CM_nomodel, lda=TRUE, ntree=1000, sampsize=min(10^5, length(modelindex)), paral = TRUE, NCORES = 4)
+#my_RF1 <- abcrf(modelindex, SI_vs_PSC_OSC_CM_nomodel, lda=TRUE, ntree=100, sampsize=1000, paral = TRUE, NCORES = 4)
+
+
+# plot the summary stat importance:
+pdf( sprintf("%s.SI_vs_PSC_OSC_CM.RF.sumstat_importance.pdf", outfile_prefix) )
+plot(my_RF1, n.var=(ncol(all_sumstats_nomodel)+2), cex = 0.3, pdf = TRUE)
+dev.off()
+
+
+print("Done.")
+print("classifying observed data and calculating posterior prob.")
+
+# first the global classification and "posterior probability"
+my_RF_classification_result_global <- predict(my_RF1, obs_real, ntree=1000, sampsize=min(10^5, length(modelindex)), paral = TRUE, NCORES = 4 )
+#my_RF_classification_result_global <- predict(my_RF1, obs_real, ntree=100, sampsize=1000, paral = TRUE, NCORES = 4 )
+
+chosen_model <- as.character( my_RF_classification_result_global$allocation )
+if (chosen_model == "PSC_OSC_CM") {
+PP_1 <- my_RF_classification_result_global$post.prob
+PP_2 <- 1.0 - my_RF_classification_result_global$post.prob
+} else {
+PP_2 <- my_RF_classification_result_global$post.prob
+PP_1 <- 1.0 - my_RF_classification_result_global$post.prob
+}
+
+res <- c("PSC_OSC_CM", "SI", PP_1, PP_2, my_RF1$prior.err)
+collector <- rbind(collector, res)
+
+
+
+################################################
+# 6. final analyis: build random forest (highest parameters), classify and compute posterior prob.: CM_OSC vs PSC
+################################################
+
+tmp <- all_sumstats[all_sumstats$model=="OSC",]
+tmp$model <- as.factor(as.character(tmp$model))
+downsampled_OSC <- random_sample_from_sumstats(tmp,10000)
+
+tmp <- all_sumstats[all_sumstats$model=="CM",]
+tmp$model <- as.factor(as.character(tmp$model))
+downsampled_CM <- random_sample_from_sumstats(tmp,10000)
+
+sumstats_OSC_CM <- rbind(downsampled_OSC, downsampled_CM )
+
+sumstats_OSC_CM$model <- "OSC_CM"
+
+PSC_vs_OSC_CM <- rbind(all_sumstats[all_sumstats$model=="PSC",], sumstats_OSC_CM  )
+modelindex <- as.factor(as.character(PSC_vs_OSC_CM$model))
+PSC_vs_OSC_CM_nomodel <- PSC_vs_OSC_CM
+PSC_vs_OSC_CM_nomodel$model <- NULL
+
+#
+print("growing final random forest")
+my_RF2 <- abcrf(modelindex, PSC_vs_OSC_CM_nomodel, lda=TRUE, ntree=1000, sampsize=min(10^5, length(modelindex)), paral = TRUE, NCORES = 4)
+#my_RF2 <- abcrf(modelindex, PSC_vs_OSC_CM_nomodel, lda=TRUE, ntree=100, sampsize=1000, paral = TRUE, NCORES = 4)
+
+
+# plot the summary stat importance:
+pdf( sprintf("%s.PSC_vs_OSC_CM.RF.sumstat_importance.pdf", outfile_prefix) )
+plot(my_RF2, n.var=(ncol(all_sumstats_nomodel)+2), cex = 0.3, pdf = TRUE)
+dev.off()
+
+
+print("Done.")
+print("classifying observed data and calculating posterior prob.")
+
+# first the global classification and "posterior probability"
+my_RF_classification_result_global <- predict(my_RF2, obs_real, ntree=1000, sampsize=min(10^5, length(modelindex)), paral = TRUE, NCORES = 4 )
+#my_RF_classification_result_global <- predict(my_RF2, obs_real, ntree=100, sampsize=1000, paral = TRUE, NCORES = 4 )
+
+print(as.character( my_RF_classification_result_global$allocation ))
+
+chosen_model <- as.character( my_RF_classification_result_global$allocation )
+if (chosen_model == "OSC_CM") {
+PP_1 <- my_RF_classification_result_global$post.prob
+PP_2 <- 1.0 - my_RF_classification_result_global$post.prob
+} else {
+PP_2 <- my_RF_classification_result_global$post.prob
+PP_1 <- 1.0 - my_RF_classification_result_global$post.prob
+}
+
+res <- c("OSC_CM", "PSC", PP_1, PP_2, my_RF2$prior.err)
+collector <- rbind(collector, res)
+
+
+
+################################################
+# 7. final analyis: build random forest (highest parameters), classify and compute posterior prob.: CM vs OSC
+################################################
+
+
+OSC_vs_CM <- rbind(all_sumstats[all_sumstats$model=="OSC",], all_sumstats[all_sumstats$model=="CM",]  )
+modelindex <- as.factor(as.character(OSC_vs_CM$model))
+OSC_vs_CM_nomodel <- OSC_vs_CM
+OSC_vs_CM_nomodel$model <- NULL
+
+#
+print("growing final random forest")
+my_RF3 <- abcrf(modelindex, OSC_vs_CM_nomodel, lda=TRUE, ntree=1000, sampsize=min(10^5, length(modelindex)), paral = TRUE, NCORES = 4)
+#my_RF3 <- abcrf(modelindex, OSC_vs_CM_nomodel, lda=TRUE, ntree=100, sampsize=1000, paral = TRUE, NCORES = 4)
+
+
+# plot the summary stat importance:
+pdf( sprintf("%s.CM_vs_OSC.RF.sumstat_importance.pdf", outfile_prefix) )
+plot(my_RF3, n.var=(ncol(all_sumstats_nomodel)+2), cex = 0.3, pdf = TRUE)
+dev.off()
+
+
+print("Done.")
+print("classifying observed data and calculating posterior prob.")
+
+# first the global classification and "posterior probability"
+my_RF_classification_result_global <- predict(my_RF3, obs_real, ntree=1000, sampsize=min(10^5, length(modelindex)), paral = TRUE, NCORES = 4 )
+#my_RF_classification_result_global <- predict(my_RF3, obs_real, ntree=100, sampsize=1000, paral = TRUE, NCORES = 4 )
+
+print(as.character( my_RF_classification_result_global$allocation ))
+
+chosen_model <- as.character( my_RF_classification_result_global$allocation )
+if (chosen_model == "CM") {
+PP_1 <- my_RF_classification_result_global$post.prob
+PP_2 <- 1.0 - my_RF_classification_result_global$post.prob
+} else {
+PP_2 <- my_RF_classification_result_global$post.prob
+PP_1 <- 1.0 - my_RF_classification_result_global$post.prob
+}
+
+res <- c("CM", "OSC", PP_1, PP_2, my_RF3$prior.err)
+collector <- rbind(collector, res)
+
+############### Wrap up
+
+collector <- as.data.frame(collector, row.names = FALSE)
+colnames(collector) <- c("model_1","model_2","PP_1", "PP_2", "prior_error_OOB")
+
+print( collector )
+
+sink(file = sprintf("%s.RF.classification.txt", outfile_prefix) , append = FALSE)
+options(width=1000) # to avoid wrapping of long rows 
+print("info on the Random Forest2:")
+print(my_RF1)
+print("#########################")
+print(my_RF2)
+print("#########################")
+print(my_RF3)
+print("#########################")
+print("#")
+print("result of classification:")
+print("#")
+print(collector, row.names = FALSE, quote = FALSE)
+sink()
+
+print("Done.")
+
+

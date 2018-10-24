@@ -1,0 +1,86 @@
+
+############### ###############  ###############
+# Step 1: convert .vcf genotypes to allele frequencies, arbitrary polarised
+###############  ##############  ###############
+- remove highmiss, duplicates and hybrids
+- keep all sites >= 70% presence per population, over all 22 populations!
+
+
+# create popmap
+
+vcf=
+
+python $tb/vcf_to_arbitrary_allele_freq.py --popmap popmap.txt --vcf ${vcf} --max_missing_ingr 0.2 --out ${vcf}.poplevel.maxmiss_0.2.arbitrary_allele_freqs.txt
+
+## retained sites:	702195 out of 2715172
+
+###############  ##############  ###############
+# Step 2: build quartets for ABBA-BABA tests!
+###############  ##############  ###############
+
+## which pairs of species and locations conform to required topology? python code:
+specs_and_locs = [
+["hemsleyana","Brunei"],
+["hemsleyana","Binyo"],
+["rafflesiana_tf","Brunei"],
+["rafflesiana_tf","Binyo"],
+["rafflesiana_tf","Kuching"],
+["rafflesiana_gf","Brunei"],
+["rafflesiana_gf","Kuching"],
+["rafflesiana","Singapore"],
+["ampullaria","Singapore"],
+["gracilis","Singapore"],
+["ampullaria","Brunei"],
+["mirabilis","Brunei"],
+["gracilis","Brunei"],
+["bicalcarata","Brunei"],
+["ampullaria","Binyo"],
+["mirabilis","Binyo"],
+["gracilis","Binyo"],
+["bicalcarata","Binyo"],
+["ampullaria","Kuching"],
+["mirabilis","Kuching"],
+["gracilis","Kuching"],
+["bicalcarata","Kuching"]]
+
+nonredundant_quartets = set()
+for a in specs_and_locs:
+	for b in specs_and_locs:
+		if a[0] == b[0] and a[1] != b[1]:
+			spec1 = a[0]
+			locs = [a[1],b[1]]
+			for c in specs_and_locs:
+				if c[0] != spec1:
+					for d in specs_and_locs:
+						if c[0] == d[0] and c[1] != d[1]:
+							if c[1] in locs and d[1] in locs:
+								quartet = ":::".join( sorted( [ "XX".join(sorted(["-".join(a),"-".join(b)])) , "XX".join( sorted(["-".join(c),"-".join(d)]) ) ] ) )
+								nonredundant_quartets.add( quartet )
+
+								
+len( nonredundant_quartets )
+print nonredundant_quartets				
+out = sorted( list( nonredundant_quartets )	)		
+out2 = [ "\t".join(x.split(":::")) for x in out ]		
+out3 = [ "\t".join(x.split("XX")) for x in out2 ]	
+
+with open("abba-baba-quartets.txt", "w") as OUTF:
+	OUTF.write("\n".join(out3) + "\n")
+
+## result: 43 quartets
+
+###############  ##############  ###############
+# Step 3: run ABBA-BABA tests!
+###############  ##############  ###############
+
+
+python abba_baba_freq.py --i ${vcf}.poplevel.maxmiss_0.2.arbitrary_allele_freqs.txt --tests abba-baba-quartets.txt --o Dstats_out.sympatr-allopatr.Patterson_formulae.txt
+
+
+
+
+
+
+
+
+
